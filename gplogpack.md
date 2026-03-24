@@ -34,7 +34,7 @@ echo "Done! Archive created: ${OUT_DIR}.tar.gz. To inspect: tar -tvf ${OUT_DIR}.
 ```
 
 - Run this script as the `gpadmin` user on the Master/Coordinator host. Adjust the first four variables to define your search criteria.
-**Parallelly collect and view time-filtered segment logs with automatic cleanup of temporary files.**
+**Parallelly collect and view in less time-filtered segment logs with automatic cleanup of temporary files.**
 ```sh
 # Configuration: SEG - segment number (empty “” - all, -1 - master), role (“‘p’” or “‘m’” or “‘p’,'m'”), and time period:
 SEG="-1"; \
