@@ -17,7 +17,8 @@ All rights reserved. */
 
 ### Implementation Script
 
-Run this script as the `gpadmin` user on the Master/Coordinator host. Adjust the first four variables to define your search criteria.
+- Run this script as the `gpadmin` user on the Master/Coordinator host. Adjust the first four variables to define your search criteria.
+**Parallelly collect and archive time-filtered segment logs with automatic cleanup of temporary files.** 
 
 ```sh
 # Configuration: SEG - segment number (empty “” - all, -1 - master), role (“‘p’” or “‘m’” or “‘p’,'m'”), and time period:
@@ -30,6 +31,19 @@ psql postgres -AtF' ' -c "SELECT hostname, content, datadir, role FROM gp_segmen
 xargs -r -P 8 -n 4 sh -c 'ssh -n -o BatchMode=yes "$2" "ls $4/pg_log/gpdb-20* 2>/dev/null | sort | awk -v s=\"${0% *}\" -v e=\"${1% *}\" \"{f=\\\$0; gsub(/.*\\//,\\\"\\\",f)} f >= \\\"gpdb-\\\"s || f ~ s { p=1 } p { print \\\$0; if (f >= \\\"gpdb-\\\"e && f !~ e) exit }\" | xargs -r zcat -f | awk -v h=\"$2\" -v c=\"$3\" -v r=\"$5\" -v s=\"$0\" -v e=\"$1\" \"\\\$1~/^[0-9]{4}-/{o=(\\\$1\\\" \\\"\\\$2>=s && \\\$1\\\" \\\"\\\$2<=e)} o { print \\\"[\\\" h \\\" seg\\\" c \\\" \\\" r \\\"] \\\" \\\$0 }\"" > '$OUT_DIR'/seg_$3_$5_$2.log' "$S" "$E" && \
 tar -czf "${OUT_DIR}.tar.gz" -C /tmp "$DIR_NAME" && chmod 644 "${OUT_DIR}.tar.gz" && rm -rf "$OUT_DIR" && \
 echo "Done! Archive created: ${OUT_DIR}.tar.gz. To inspect: tar -tvf ${OUT_DIR}.tar.gz"
+```
+
+**Parallelly collect and view time-filtered segment logs with automatic cleanup of temporary files.**
+```sh
+# Configuration: SEG - segment number (empty “” - all, -1 - master), role (“‘p’” or “‘m’” or “‘p’,'m'”), and time period:
+SEG="-1"; \
+ROLE_FILTER="'p','m'"; \
+S="2026-03-23 19:05:40"; E="2026-03-23 20:10:40"; \
+DIR_NAME="gp_logs_$(date +%H%M%S)"; OUT_DIR="/tmp/$DIR_NAME"; mkdir -p $OUT_DIR; \
+echo "Collecting logs to: $OUT_DIR (Target SEG: ${SEG:-ALL}, Role: ${ROLE_FILTER:-'p'})"; \
+psql postgres -AtF' ' -c "SELECT hostname, content, datadir, role FROM gp_segment_configuration WHERE role IN (${ROLE_FILTER:-'p'}) $([ -n "$SEG" ] && echo "AND content = $SEG") ORDER BY content, role" | \
+xargs -r -P 8 -n 4 sh -c 'ssh -n -o BatchMode=yes "$2" "ls $4/pg_log/gpdb-20* 2>/dev/null | sort | awk -v s=\"${0% *}\" -v e=\"${1% *}\" \"{f=\\\$0; gsub(/.*\\//,\\\"\\\",f)} f >= \\\"gpdb-\\\"s || f ~ s { p=1 } p { print \\\$0; if (f >= \\\"gpdb-\\\"e && f !~ e) exit }\" | xargs -r zcat -f | awk -v h=\"$2\" -v c=\"$3\" -v r=\"$5\" -v s=\"$0\" -v e=\"$1\" \"\\\$1~/^[0-9]{4}-/{o=(\\\$1\\\" \\\"\\\$2>=s && \\\$1\\\" \\\"\\\$2<=e)} o { print \\\"[\\\" h \\\" seg\\\" c \\\" \\\" r \\\"] \\\" \\\$0 }\"" > '$OUT_DIR'/seg_$3_$5_$2.log' "$S" "$E" && \
+(cat $OUT_DIR/seg* | less) && rm -rf $OUT_DIR && echo "Cleanup done."
 ```
 
 ---
