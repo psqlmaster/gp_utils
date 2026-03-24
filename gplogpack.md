@@ -1,4 +1,4 @@
-## gplogpack & view
+## gplogpack & view (high-performance distributed log harvester)
 
 /* BSD 3-Clause License
 Copyright (c) 2026, Alexander Shcheglov
