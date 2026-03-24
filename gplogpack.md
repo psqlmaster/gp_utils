@@ -1,7 +1,7 @@
 ## gplogpack
 
 /* BSD 3-Clause License
-Copyright (c) 2025, Alexander Shcheglov
+Copyright (c) 2026, Alexander Shcheglov
 All rights reserved. */
 
 ### Description
