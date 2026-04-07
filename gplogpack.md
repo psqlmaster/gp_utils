@@ -1,99 +1,166 @@
-## gplogpack & view (high-performance distributed log harvester)
+## gplogpack & view [high-performance distributed log harvester](https://github.com/psqlmaster/gp_utils/blob/master/gplogpack.md)
 
-/* BSD 3-Clause License
-Copyright (c) 2026, Alexander Shcheglov
-All rights reserved. */
+**gplogpack** is a professional-grade tool for parallel log collection and filtering across all Greenplum/ADB segments. It is designed to overcome the limitations of standard utilities, particularly in environments like **ALT Linux** where `gpssh` might be unavailable, or when `gplogfilter` is insufficient because it only works locally.
 
-### Description
-**gplogpack** is a high-performance distributed log harvester for Greenplum/ADB clusters. It collects logs from all segments (including Master/Coordinator) in parallel, correctly handles log rotation across midnight boundaries, filters by specific time ranges, and packages everything into a single compressed `.tar.gz` archive.
-
-### Key Features
-- **Parallelism**: Uses `xargs -P` to fetch logs from multiple hosts simultaneously.
-- **Midnight Handling**: Automatically identifies and pulls all relevant log files if the requested range spans across multiple days.
-- **Granular Filtering**: Filter by Segment ID (`content`) or Role (`primary` / `mirror`).
-- **Context Preservation**: Prepends `[hostname segID role]` to every log line, ensuring multi-line SQL statements remain identifiable.
+### Key Advantages
+- **Distributed Architecture**: Unlike `gplogfilter`, **gplogpack** fetches and aggregates logs from the entire cluster to a single point.
+- **System Independence**: Works via standard `ssh` and `xargs`, bypassing Python-dependency issues or `gpssh` restrictions.
+- **On-Host Filtering**: Time and text filtering are performed directly on the segment hosts, drastically reducing network load.
+- **Performance Optimized**: Uses **short-circuit evaluation** in `awk`. If `TEXT_FILTER` is empty, the script skips expensive `tolower()` conversions, ensuring maximum speed.
+- **Context Preservation**: Every line is prefixed with `[hostname segID role]`, ensuring multi-line SQL statements and plans remain identifiable by their source.
 
 ---
 
-### Implementation Script
-
-- Run this script as the `gpadmin` user on the Master/Coordinator host. Adjust the first four variables to define your search criteria.
-**Parallelly collect and archive time-filtered segment logs with automatic cleanup of temporary files.** 
+### 1. Archive Collection Mode
+Use this script to collect logs into a compressed `.tar.gz` archive for deep analysis.
 
 ```sh
-# Configuration: SEG - segment number (empty “” - all, -1 - master, 1,3 - 1 & 3 segment), role (“‘p’” or “‘m’” or “‘p’,'m'”), and time period:
+# Configuration: SEG - segment number (empty “” - all, -1 - master, 1,3 - 1 & 3 segment), role (“‘p’” or “‘m’” or “‘p’,'m'”), TEXT_FILTER and time period:
 SEG=""; \
 ROLE_FILTER="'p','m'"; \
-S="2026-03-23 19:05:40"; E="2026-03-23 20:10:40"; \
+TEXT_FILTER=""; \
+S="2026-03-23 19:00:00"; E="2026-03-23 20:00:00"; \
 DIR_NAME="gp_logs_$(date +%H%M%S)"; OUT_DIR="/tmp/$DIR_NAME"; mkdir -p $OUT_DIR; \
-echo "Collecting logs to: $OUT_DIR (Target SEG: ${SEG:-ALL}, Role: ${ROLE_FILTER:-'p'})"; \
-psql postgres -AtF' ' -c "SELECT hostname, content, datadir, role FROM gp_segment_configuration WHERE role IN (${ROLE_FILTER:-'p'}) $([ -n "$SEG" ] && echo "AND content in ($SEG)") ORDER BY content, role" | \
-xargs -r -P 0 -n 4 sh -c 'ssh -n -o BatchMode=yes "$2" "ls $4/pg_log/gpdb-20* 2>/dev/null | sort | awk -v s=\"${0% *}\" -v e=\"${1% *}\" \"{f=\\\$0; gsub(/.*\\//,\\\"\\\",f)} f >= \\\"gpdb-\\\"s || f ~ s { p=1 } p { print \\\$0; if (f >= \\\"gpdb-\\\"e && f !~ e) exit }\" | xargs -r zcat -f | awk -v h=\"$2\" -v c=\"$3\" -v r=\"$5\" -v s=\"$0\" -v e=\"$1\" \"\\\$1~/^[0-9]{4}-/{o=(\\\$1\\\" \\\"\\\$2>=s && \\\$1\\\" \\\"\\\$2<=e)} o { print \\\"[\\\" h \\\" seg\\\" c \\\" \\\" r \\\"] \\\" \\\$0 }\"" > '$OUT_DIR'/seg_$3_$5_$2.log' "$S" "$E" && \
+echo "Collecting logs to: $OUT_DIR (Max parallel: 20)"; \
+psql postgres -AtF' ' -c "SELECT hostname, content, datadir, role FROM gp_segment_configuration WHERE role IN (${ROLE_FILTER}) $([ -n "$SEG" ] && echo "AND content in ($SEG)") ORDER BY content, role" | \
+xargs -r -P 20 -n 4 sh -c 'ssh -n -o BatchMode=yes -o ConnectTimeout=5 "$3" "ls $5/pg_log/gpdb-20* 2>/dev/null | sort | awk -v s=\"${0% *}\" -v e=\"${1% *}\" \"{f=\\\$0; gsub(/.*\\//,\\\"\\\",f)} f >= \\\"gpdb-\\\"s || f ~ s { p=1 } p { print \\\$0; if (f >= \\\"gpdb-\\\"e && f !~ e) exit }\" | xargs -r zcat -f | awk -v h=\"$3\" -v c=\"$4\" -v r=\"$6\" -v s=\"$0\" -v e=\"$1\" -v t=\"$2\" \"\\\$1~/^[0-9]{4}-/{o=(\\\$1\\\" \\\"\\\$2>=s && \\\$1\\\" \\\"\\\$2<=e)} o && (t==\\\"\\\" || tolower(\\\$0) ~ tolower(t)) { print \\\"[\\\" h \\\" seg\\\" c \\\" \\\" r \\\"] \\\" \\\$0 }\"" > '$OUT_DIR'/seg_$4_$6_$3.log' "$S" "$E" "$TEXT_FILTER" && \
 tar -czf "${OUT_DIR}.tar.gz" -C /tmp "$DIR_NAME" && chmod 644 "${OUT_DIR}.tar.gz" && rm -rf "$OUT_DIR" && \
-echo "Done! Archive created: ${OUT_DIR}.tar.gz. To inspect: tar -tvf ${OUT_DIR}.tar.gz"
+echo "Done! Archive: ${OUT_DIR}.tar.gz"
 ```
 
-- Run this script as the `gpadmin` user on the Master/Coordinator host. Adjust the first four variables to define your search criteria.
-**Parallelly collect and view in `less` time-filtered segment logs with automatic cleanup of temporary files.**
+---
+
+### 2. Interactive View Mode
+Use this script for immediate troubleshooting. It fetches the logs and opens them in `less`.
+
 ```sh
-# Configuration: SEG - segment number (empty “” - all, -1 - master, 1,3 - 1 & 3 segment), role (“‘p’” or “‘m’” or “‘p’,'m'”), and time period:
+# Configuration: SEG - segment number (empty “” - all, -1 - master, 1,3 - 1 & 3 segment), role (“‘p’” or “‘m’” or “‘p’,'m'”), TEXT_FILTER and time period:
 SEG="-1"; \
-ROLE_FILTER="'p','m'"; \
-S="2026-03-23 19:05:40"; E="2026-03-23 20:10:40"; \
+ROLE_FILTER="'p'"; \
+TEXT_FILTER=""; \
+S="2026-03-23 19:00:00"; E="2026-03-23 20:00:00"; \
 DIR_NAME="gp_logs_$(date +%H%M%S)"; OUT_DIR="/tmp/$DIR_NAME"; mkdir -p $OUT_DIR; \
-echo "Collecting logs to: $OUT_DIR (Target SEG: ${SEG:-ALL}, Role: ${ROLE_FILTER:-'p'})"; \
-psql postgres -AtF' ' -c "SELECT hostname, content, datadir, role FROM gp_segment_configuration WHERE role IN (${ROLE_FILTER:-'p'}) $([ -n "$SEG" ] && echo "AND content in ($SEG)") ORDER BY content, role" | \
-xargs -r -P 0 -n 4 sh -c 'ssh -n -o BatchMode=yes "$2" "ls $4/pg_log/gpdb-20* 2>/dev/null | sort | awk -v s=\"${0% *}\" -v e=\"${1% *}\" \"{f=\\\$0; gsub(/.*\\//,\\\"\\\",f)} f >= \\\"gpdb-\\\"s || f ~ s { p=1 } p { print \\\$0; if (f >= \\\"gpdb-\\\"e && f !~ e) exit }\" | xargs -r zcat -f | awk -v h=\"$2\" -v c=\"$3\" -v r=\"$5\" -v s=\"$0\" -v e=\"$1\" \"\\\$1~/^[0-9]{4}-/{o=(\\\$1\\\" \\\"\\\$2>=s && \\\$1\\\" \\\"\\\$2<=e)} o { print \\\"[\\\" h \\\" seg\\\" c \\\" \\\" r \\\"] \\\" \\\$0 }\"" > '$OUT_DIR'/seg_$3_$5_$2.log' "$S" "$E" && \
+echo "Fetching logs for interactive view..."; \
+psql postgres -AtF' ' -c "SELECT hostname, content, datadir, role FROM gp_segment_configuration WHERE role IN (${ROLE_FILTER}) $([ -n "$SEG" ] && echo "AND content in ($SEG)") ORDER BY content, role" | \
+xargs -r -P 20 -n 4 sh -c 'ssh -n -o BatchMode=yes -o ConnectTimeout=5 "$3" "ls $5/pg_log/gpdb-20* 2>/dev/null | sort | awk -v s=\"${0% *}\" -v e=\"${1% *}\" \"{f=\\\$0; gsub(/.*\\//,\\\"\\\",f)} f >= \\\"gpdb-\\\"s || f ~ s { p=1 } p { print \\\$0; if (f >= \\\"gpdb-\\\"e && f !~ e) exit }\" | xargs -r zcat -f | awk -v h=\"$3\" -v c=\"$4\" -v r=\"$6\" -v s=\"$0\" -v e=\"$1\" -v t=\"$2\" \"\\\$1~/^[0-9]{4}-/{o=(\\\$1\\\" \\\"\\\$2>=s && \\\$1\\\" \\\"\\\$2<=e)} o && (t==\\\"\\\" || tolower(\\\$0) ~ tolower(t)) { print \\\"[\\\" h \\\" seg\\\" c \\\" \\\" r \\\"] \\\" \\\$0 }\"" > '$OUT_DIR'/seg_$4_$6_$3.log' "$S" "$E" "$TEXT_FILTER" && \
 (cat $OUT_DIR/seg* | less) && rm -rf $OUT_DIR && echo "Cleanup done."
 ```
 
 ---
 
+### Parameters Reference
+
+| Variable | Description |
+| :--- | :--- |
+| `SEG` | Segment ID. `""` for ALL, `"-1"` for Master, `"1,2,5"` for a subset. |
+| `ROLE_FILTER` | `'p'` (Primary), `'m'` (Mirror), or both `'p','m'`. |
+| `TEXT_FILTER` | Case-insensitive Extended Regex. Supports `|`, `.*`, `()`. |
+| `S` / `E` | Start and End timestamps (YYYY-MM-DD HH:MM:SS). |
+
+---
+
 ### Usage Examples
 
-#### 1. Fetching specific Segment logs (Primary & Mirror)
-If you need to investigate a specific segment (e.g., Segment ID 3) and compare its Primary and Mirror logs:
-
-```bash
-SEG="3"; ROLE_FILTER="'p','m'"; S="2026-03-23 19:05:40"; E="2026-03-23 20:10:40";
-# ... run script ...
-# Resulting archive content:
-tar -tzf /tmp/gp_logs_003148.tar.gz
-# gp_logs_003148/
-# gp_logs_003148/seg_3_p_sdw2.log
-# gp_logs_003148/seg_3_m_sdw1.log
+#### 1. Subset of Segments (Example: Segments 1, 2, and 5)
+Collect logs from three specific segments to investigate localized issues.
+```sh
+SEG="1,2,5"; ROLE_FILTER="'p'"; TEXT_FILTER=""; S="2026-03-24 10:00:00"; E="2026-03-24 11:00:00";
 ```
 
-#### 2. Fetching Mirror logs only for a specific segment
-Useful for checking synchronization issues or health status on standbys:
-
-```bash
-SEG="3"; ROLE_FILTER="'m'"; S="2026-03-23 19:05:40"; E="2026-03-23 20:10:40";
-# ... run script ...
-# Resulting archive content:
-tar -tzf /tmp/gp_logs_003504.tar.gz
-# gp_logs_003504/
-# gp_logs_003504/seg_3_m_sdw1.log
+#### 2. Full Cluster Dump (No filtering)
+Fastest mode. Collects everything from all segments across the cluster.
+```sh
+SEG=""; ROLE_FILTER="'p','m'"; TEXT_FILTER=""; S="2026-03-24 00:00:00"; E="2026-03-24 23:59:59";
 ```
 
-#### 3. Full Cluster Collection (All segments, All roles)
+#### 3. Specific IP or Version Search
+The dot works as a wildcard, matching IPs or versions effectively.
+```sh
+SEG=""; ROLE_FILTER="'p'"; TEXT_FILTER="192.168.1.50"; S="2026-03-24 00:00:00"; E="2026-03-24 23:59:59";
+```
+
+#### 4. Searching for Global Errors (Multiple Keywords)
+Find any critical event using the OR (`|`) operator.
+```sh
+SEG=""; ROLE_FILTER="'p'"; TEXT_FILTER="panic|fatal|error|critical|oom"; S="2026-03-24 00:00:00"; E="2026-03-24 23:59:59";
+```
+
+#### 5. Master Session Investigation
+Track a specific session ID on the Master/Coordinator only.
+```sh
+SEG="-1"; ROLE_FILTER="'p'"; TEXT_FILTER="con184201"; S="2026-03-24 10:00:00"; E="2026-03-24 12:00:00";
+```
+
+#### 6. Midnight Boundary Analysis
+Automatically pulls files from multiple dates if the range crosses midnight.
+```sh
+SEG="5"; ROLE_FILTER="'p','m'"; TEXT_FILTER="failover|retry"; S="2026-03-23 23:50:00"; E="2026-03-24 00:30:00";
+```
+
+#### 7. SQL Object Search (with Quoting)
+Find errors specifically related to a quoted table name.
+```sh
+SEG=""; ROLE_FILTER="'p'"; TEXT_FILTER="\"order_items\""; S="2026-03-24 14:00:00"; E="2026-03-24 15:00:00";
+```
+
+#### 8. Pattern Matching (Wildcards)
+Find logs where two words appear in the same line regardless of what is between them.
+```sh
+SEG=""; ROLE_FILTER="'p'"; TEXT_FILTER="user.*denied"; S="2026-03-24 00:00:00"; E="2026-03-24 23:59:59";
+```
+
+#### 9. Synchronization & Mirror Lag
+Compare Primary and Mirror behavior for a specific segment during a lag event.
+```sh
+SEG="12"; ROLE_FILTER="'p','m'"; TEXT_FILTER="replication|sender|receiver"; S="2026-03-24 08:00:00"; E="2026-03-24 09:00:00";
+```
+---
+
+#### Working with Archives
+
+**List archive content:**
+```bash
+tar -tvzf /tmp/gp_logs_XXXXXX.tar.gz
+```
+
+**Stream logs directly from archive (no extraction needed):**
+```bash
+# Search for a keyword across all logs in the compressed archive
+tar -xzOf /tmp/gp_logs_XXXXXX.tar.gz | grep -i "error_keyword"
+
+# Read a specific segment's log
+tar -xzOf /tmp/gp_logs_XXXXXX.tar.gz gp_logs_XXXXXX/seg_0_p_sdw1.log | less
+```
+---
+
+#### Full Cluster Collection (All segments, All roles)
 Comprehensive collection for root cause analysis of cluster-wide issues:
 
 ```bash
 SEG=""; ROLE_FILTER="'p','m'"; S="2026-03-23 19:05:40"; E="2026-03-23 20:10:40";
-# ... run script ...
-# Archive will contain logs from all Primary and Mirror hosts:
-tar -tvf /tmp/gp_logs_003803.tar.gz
-# -rw-r--r-- gpadmin/gpadmin  seg_1_p_sdw1.log
-# -rw-r--r-- gpadmin/gpadmin  seg_-1_m_mdw2.log
-# -rw-r--r-- gpadmin/gpadmin  seg_0_m_sdw2.log
-# -rw-r--r-- gpadmin/gpadmin  seg_0_p_sdw1.log
-# ... etc ...
+```
+#### Archive will contain logs from all Primary and Mirror hosts:
+```bash
+tar -tvf /tmp/gp_logs_111934.tar.gz
+```
+**output:**
+```txt
+drwxr-xr-x gpadmin/gpadmin   0 2026-04-07 11:19 gp_logs_111934/
+-rw-r--r-- gpadmin/gpadmin 846733 2026-04-07 11:19 gp_logs_111934/seg_1_p_sdw1.log
+-rw-r--r-- gpadmin/gpadmin   8860 2026-04-07 11:19 gp_logs_111934/seg_-1_m_mdw2.log
+-rw-r--r-- gpadmin/gpadmin   6296 2026-04-07 11:19 gp_logs_111934/seg_0_m_sdw2.log
+-rw-r--r-- gpadmin/gpadmin 846652 2026-04-07 11:19 gp_logs_111934/seg_0_p_sdw1.log
+-rw-r--r-- gpadmin/gpadmin   6299 2026-04-07 11:19 gp_logs_111934/seg_2_m_sdw1.log
+-rw-r--r-- gpadmin/gpadmin 630147 2026-04-07 11:19 gp_logs_111934/seg_-1_p_mdw1.log
+-rw-r--r-- gpadmin/gpadmin   6299 2026-04-07 11:19 gp_logs_111934/seg_1_m_sdw2.log
+-rw-r--r-- gpadmin/gpadmin 846648 2026-04-07 11:19 gp_logs_111934/seg_3_p_sdw2.log
+-rw-r--r-- gpadmin/gpadmin   6271 2026-04-07 11:19 gp_logs_111934/seg_3_m_sdw1.log
+-rw-r--r-- gpadmin/gpadmin 846689 2026-04-07 11:19 gp_logs_111934/seg_2_p_sdw2.log
 ```
 
 ---
 
-### Working with Archives
+#### Working with Archives
 
 **List files in the archive:**
 ```bash
@@ -109,3 +176,6 @@ tar -xzf /tmp/gp_logs_XXXXXX.tar.gz
 ```bash
 tar -xzOf /tmp/gp_logs_XXXXXX.tar.gz gp_logs_XXXXXX/seg_0_p_sdw1.log | less
 ```
+---
+*Copyright (c) 2025, Alexander Shcheglov. BSD 3-Clause License.*
+
