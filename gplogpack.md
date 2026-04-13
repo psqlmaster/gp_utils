@@ -32,7 +32,7 @@ echo "Done! Archive: ${OUT_DIR}.tar.gz"
 Done! Archive: /tmp/gp_logs_202043.tar.gz
 ```
 
-### 3. Archive Collection Mode in many archive files `*.gz`
+### 2. Archive Collection Mode in many archive files `*.gz`
 ```sh
 # Configuration: SEG - segment number (empty “” - all, -1 - master, 1,3 - 1 & 3 segment), role (“‘p’” or “‘m’” or “‘p’,'m'”), TEXT_FILTER and time period:
 SEG="-1,2"; \
@@ -55,7 +55,7 @@ Done! Created files:
 ```
 ---
 
-### 2. Interactive View Mode
+### 3. Interactive View Mode
 Use this script for immediate troubleshooting. It fetches the logs and opens them in `less`.
 
 ```sh
