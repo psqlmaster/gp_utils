@@ -2,12 +2,28 @@
 
 **gplogpack** is a professional-grade tool for parallel log collection and filtering across all Greenplum/ADB segments. It is designed to overcome the limitations of standard utilities, particularly in environments like **ALT Linux** where `gpssh` might be unavailable, or when `gplogfilter` is insufficient because it only works locally.
 
-### Key Advantages
-- **Distributed Architecture**: Unlike `gplogfilter`, **gplogpack** fetches and aggregates logs from the entire cluster to a single point.
-- **System Independence**: Works via standard `ssh` and `xargs`, bypassing Python-dependency issues or `gpssh` restrictions.
-- **On-Host Filtering**: Time and text filtering are performed directly on the segment hosts, drastically reducing network load.
-- **Performance Optimized**: Uses **short-circuit evaluation** in `awk`. If `TEXT_FILTER` is empty, the script skips expensive `tolower()` conversions, ensuring maximum speed.
-- **Context Preservation**: Every line is prefixed with `[hostname segID role]`, ensuring multi-line SQL statements and plans remain identifiable by their source.
+---
+
+### Table of Contents
+1. [Key Advantages](#key-advantages)
+2. [1. Archive Collection Mode (Single tar.gz)](#1-archive-collection-mode-in-1-archive-file-targz)
+3. [2. Archive Collection Mode (Individual .gz files)](#2-archive-collection-mode-in-many-archive-files-gz)
+4. [2.2. Archive Collection Mode (Anonymized .gz files)](#22-archive-collection-mode-in-many-archive-files-gz-with-anonymization)
+5. [3. Interactive View Mode](#3-interactive-view-mode)
+6. [Parameters Reference](#parameters-reference)
+7. [Usage Examples](#usage-examples)
+8. [Working with Archives](#working-with-archives)
+
+---
+
+### <a name="key-advantages"></a>Key Advantages
+- **Distributed Architecture**: Unlike `gplogfilter`, **gplogpack** fetches and aggregates logs from the entire cluster to a single central point.
+- **System Independence**: Works via standard `ssh` and `xargs`, bypassing Python-dependency issues or `gpssh` restrictions often found in hardened OS distributions.
+- **On-Host Filtering**: Time and text filtering are performed directly on the segment hosts. Only the matching data is sent over the network, drastically reducing traffic and collection time.
+- **Performance Optimized**: Uses **short-circuit evaluation** in `awk`. If no `TEXT_FILTER` is provided, the script skips expensive string conversions (like `tolower()`), ensuring maximum processing speed.
+- **Context Preservation**: Every line is prefixed with `[hostname segID role]`. This ensures that even when logs are aggregated, multi-line SQL statements and query plans remain identifiable by their source.
+- **On-the-fly Anonymization**: Supports real-time data masking. You can redact IPs, logins, and PII (Cyrillic characters) before the data is ever written to the disk of the collection node.
+- **Zero-Storage Impact**: By using anonymization and compression in a single pipeline (pipe), the tool processes data in memory without creating unencrypted temporary files.
 
 ---
 
@@ -52,6 +68,24 @@ Done! Created files:
 -rw-r--r-- 1 gpadmin gpadmin  41K Apr 12 20:16 /tmp/gp_logs_201610/seg_-1_p_mdw1.log.gz
 -rw-r--r-- 1 gpadmin gpadmin  775 Apr 12 20:16 /tmp/gp_logs_201610/seg_2_m_sdw1.log.gz
 -rw-r--r-- 1 gpadmin gpadmin  40K Apr 12 20:16 /tmp/gp_logs_201610/seg_2_p_sdw2.log.gz
+```
+---
+
+### 2.2. Archive Collection Mode in many archive files `*.gz` (with Anonymization)
+```sh
+# Configuration: SEG - segment number (empty “” - all, -1 - master, 1,3 - 1 & 3 segment), role (“‘p’” or “‘m’” or “‘p’,'m'”), TEXT_FILTER and time period,
+# ANONYMIZE - If set to “true”, the logs will be processed using anonymization rules.
+SEG="2"; \
+ROLE_FILTER="'p','m'"; \
+TEXT_FILTER=""; \
+ANONYMIZE="true"; \
+S="2026-03-23 19:00:00"; E="2026-03-23 20:00:00"; \
+DIR_NAME="gp_logs_$(date +%H%M%S)"; OUT_DIR="/tmp/$DIR_NAME"; mkdir -p $OUT_DIR; \
+MASK_CMD="sed -E 's/[А-Яа-яЁё]/x/g; s/[0-9]{1,3}(\.[0-9]{1,3}){3}/X.X.X.X/g; s/\.int\.bank\.ru/.xxx.ru/g; s/(ndp|srv|apl|gml|vnl)-/xxx-/g; s/gpbu[0-9]+/USER_ID/g; s/DC=[a-zA-Z0-9]+/DC=XXX/g'"; \
+echo "Collecting logs to: $OUT_DIR (Anonymize: $ANONYMIZE)"; \
+psql postgres -AtF' ' -c "SELECT hostname, content, datadir, role FROM gp_segment_configuration WHERE role IN (${ROLE_FILTER}) $([ -n "$SEG" ] && echo "AND content in ($SEG)") ORDER BY content, role" | \
+xargs -r -P 20 -n 4 sh -c 'ssh -n -o BatchMode=yes -o ConnectTimeout=5 "$5" "ls $7/pg_log/gpdb-20* 2>/dev/null | sort | awk -v s=\"${0% *}\" -v e=\"${1% *}\" \"{f=\\\$0; gsub(/.*\\//,\\\"\\\",f)} f >= \\\"gpdb-\\\"s || f ~ s { p=1 } p { print \\\$0; if (f >= \\\"gpdb-\\\"e && f !~ e) exit }\" | xargs -r zcat -f | awk -v h=\"$5\" -v c=\"$6\" -v r=\"$8\" -v s=\"$0\" -v e=\"$1\" -v t=\"$2\" \"\\\$1~/^[0-9]{4}-/{o=(\\\$1\\\" \\\"\\\$2>=s && \\\$1\\\" \\\"\\\$2<=e)} o && (t==\\\"\\\" || tolower(\\\$0) ~ tolower(t)) { print \\\"[\\\" h \\\" seg\\\" c \\\" \\\" r \\\"] \\\" \\\$0 }\"" | ( [ "$3" = "true" ] && eval "$4" || cat ) | gzip > '$OUT_DIR'/seg_$6_$8_$5.log.gz' "$S" "$E" "$TEXT_FILTER" "$ANONYMIZE" "$MASK_CMD" && \
+chmod 644 $OUT_DIR/*.gz && echo -e "\nDone! Created files:" && ls -lh "$OUT_DIR"/*.gz
 ```
 ---
 
